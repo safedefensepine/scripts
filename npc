@@ -25,10 +25,12 @@ local function WalkPath(root, path)
     return obj
 end
 
+local function normalize(s)
+    return s:lower():gsub("[%s_%-]", "")
+end
+
 -- ──────────────────────────────────────────────
--- Quest Markers — defined FIRST so GetQuestNPCName can use it
--- Only counts Model instances named "questbrick" that are
--- direct children of workspace.Effects
+-- Quest Markers
 -- ──────────────────────────────────────────────
 
 local questMarkerIndex = 0
@@ -62,160 +64,165 @@ local function GetAllQuestMarkers()
     return markers
 end
 
-local function TeleportToNextQuestMarker()
-    local character = LocalPlayer.Character
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    if not root then
-        Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
-        return
-    end
-
-    local markers = GetAllQuestMarkers()
-    if #markers == 0 then
-        Library:Notify({ Title = "Error", Description = "No quest markers found.", Time = 3 })
-        return
-    end
-
-    -- Always cycle forward, no reset
-    questMarkerIndex = (questMarkerIndex % #markers) + 1
-
-    local marker = markers[questMarkerIndex]
-    root.CFrame = marker.part.CFrame + Vector3.new(0, 4, 0)
-
-    local label = (#markers > 1) and (" (" .. questMarkerIndex .. "/" .. #markers .. ")") or ""
-    Library:Notify({ Title = "TP to Quest", Description = marker.title .. label, Time = 2 })
-end
-
 -- ──────────────────────────────────────────────
 -- Quest NPC Detection
--- Reads objective label paths only — does NOT use marker titles
--- so NPCs are never mistakenly used as markers
+-- Scans ALL TextLabels in PlayerGui broadly — no hardcoded paths.
+-- Skips known shop/inventory GUIs to avoid false matches on item names.
+-- Matches against npc_cache names (longest first to avoid partial matches).
 -- ──────────────────────────────────────────────
 
 local EXTRACT_PATTERNS = {
-    -- Colon style: "Talk to: Boxing Coach"
-    "[Tt]alk [Tt]o:%s*([%a][%a%s]*[%a])",
-    "[Ss]peak [Tt]o:%s*([%a][%a%s]*[%a])",
-    "[Ss]peak [Ww]ith:%s*([%a][%a%s]*[%a])",
-    "[Ee]scort:%s*([%a][%a%s]*[%a])",
-    "[Pp]rotect:%s*([%a][%a%s]*[%a])",
-    "[Vv]isit:%s*([%a][%a%s]*[%a])",
-    "[Ii]nteract [Ww]ith:%s*([%a][%a%s]*[%a])",
-    -- Space style with capital: "Talk to Kobayashi"
-    "[Tt]alk [Tt]o%s+([%u][%a%s]+[%a])",
-    "[Ss]peak [Tt]o%s+([%u][%a%s]+[%a])",
-    "[Ff]ind%s+([%u][%a%s]+[%a])",
-    -- Defeat/Kill/Chase: "Defeat Okuyasu Nijimura"
-    "[Dd]efeat%s+([%u][%a%s]+[%a])",
-    "[Kk]ill%s+([%u][%a%s]+[%a])",
-    "[Cc]hase%s+([%u][%a%s]+[%a])",
-    "[Ff]ollow%s+([%u][%a%s]+[%a])",
+    -- Colon style: "Talk to: Clinician"
+    "[Tt]alk%s+[Tt]o:%s*(.+)",
+    "[Ss]peak%s+[Tt]o:%s*(.+)",
+    "[Ss]peak%s+[Ww]ith:%s*(.+)",
+    "[Ee]scort:%s*(.+)",
+    "[Pp]rotect:%s*(.+)",
+    "[Vv]isit:%s*(.+)",
+    "[Ii]nteract%s+[Ww]ith:%s*(.+)",
+    -- Space style: "Talk to Kobayashi"
+    "[Tt]alk%s+[Tt]o%s+([%u][%a%s]+)",
+    "[Ss]peak%s+[Tt]o%s+([%u][%a%s]+)",
+    "[Ff]ind%s+([%u][%a%s]+)",
+    "[Dd]efeat%s+([%u][%a%s]+)",
+    "[Kk]ill%s+([%u][%a%s]+)",
+    "[Cc]hase%s+([%u][%a%s]+)",
+    "[Ff]ollow%s+([%u][%a%s]+)",
+    "[Ii]nvestigate%s+[Tt]he%s+([%u][%a%s]+)",
+    "[Ii]nvestigate%s+([%u][%a%s]+)",
 }
 
-local OBJECTIVE_PATHS = {
-    { "menu", "task_holder", "holder", "newobjective", "ScrollingFrame", "holder", "singleobjective", "TextLabel" },
-    { "menu", "task_holder", "holder", "newobjective", "ScrollingFrame", "holder", "multiobjective", "text", "TextLabel" },
+-- These words in a TextLabel's text indicate it is a quest action line
+local QUEST_ACTION_WORDS = {
+    "talk to", "speak to", "speak with", "find ", "defeat ",
+    "kill ", "chase ", "follow ", "escort ", "protect ",
+    "visit ", "interact with", "investigate ",
 }
+
+local function IsQuestActionText(text)
+    local lower = text:lower()
+    for _, w in ipairs(QUEST_ACTION_WORDS) do
+        if lower:find(w, 1, true) then return true end
+    end
+    return false
+end
 
 local function GetQuestNPCName()
     local found = nil
     pcall(function()
-        local npcCache = ReplicatedStorage.assets.npc_cache:GetChildren()
-        local gui = LocalPlayer.PlayerGui
-
-        -- Collect texts from objective label paths
-        local textsToCheck = {}
-        for _, pathDef in ipairs(OBJECTIVE_PATHS) do
-            local label = WalkPath(gui, pathDef)
-            if label and label:IsA("TextLabel") and label.Text ~= "" then
-                local cleaned = label.Text
-                    :gsub("<[^>]+>", "")   -- strip RichText
-                    :gsub("[「」『』【】〔〕]", "") -- strip Japanese brackets
-                    :gsub("%[.-%]", "")    -- strip [0/1] style counters
-                    :gsub("%(.-%)", "")    -- strip (0/1) style counters
-                    :gsub("%s+", " ")
-                    :match("^%s*(.-)%s*$")
-                table.insert(textsToCheck, cleaned)
+        -- Build combined NPC list from cache + workspace.Npcs
+        local npcCache = {}
+        local _cache = ReplicatedStorage:FindFirstChild("assets")
+            and ReplicatedStorage.assets:FindFirstChild("npc_cache")
+        if _cache then
+            for _, c in ipairs(_cache:GetChildren()) do table.insert(npcCache, c) end
+        end
+        local _wsNpcs = Workspace:FindFirstChild("Npcs")
+        if _wsNpcs then
+            for _, c in ipairs(_wsNpcs:GetChildren()) do
+                if c:IsA("Model") and c:FindFirstChildOfClass("Humanoid") then
+                    table.insert(npcCache, c)
+                end
             end
         end
+        local gui = LocalPlayer.PlayerGui
 
-        -- Normalize: lowercase, strip spaces and underscores for fuzzy comparison
-        local function normalize(s)
-            return s:lower():gsub("[%s_%-]", "")
-        end
+        -- Longest-name-first so "Corrupt Police Officer" beats "Police Officer"
+        table.sort(npcCache, function(a, b) return #a.Name > #b.Name end)
 
-        local function tryMatch(text)
-            local lowerText = text:lower()
-            local normText = normalize(text)
+        -- ONLY scan inside the quest task_holder — nowhere else
+        local priorityTexts = {}
+        local fallbackTexts = {}
 
-            -- Step 1: pattern extraction (e.g. "Talk to: Boxing Coach")
-            for _, pattern in ipairs(EXTRACT_PATTERNS) do
-                local m = text:match(pattern)
-                if m then
-                    local extracted = m:match("^%s*(.-)%s*$")
-                    local normExtracted = normalize(extracted)
-                    local lowerExtracted = extracted:lower()
-                    for _, child in ipairs(npcCache) do
-                        local childLower = child.Name:lower()
-                        local normChild = normalize(child.Name)
-                        if normChild == normExtracted
-                            or childLower == lowerExtracted
-                            or normChild:find(normExtracted, 1, true)
-                            or normExtracted:find(normChild, 1, true) then
-                            found = child.Name
-                            return true
+        local taskHolder = WalkPath(gui, { "menu", "task_holder" })
+        if taskHolder then
+            for _, obj in ipairs(taskHolder:GetDescendants()) do
+                if obj:IsA("TextLabel") and obj.Text ~= "" then
+                    local cleaned = obj.Text
+                        :gsub("<[^>]+>", "")
+                        :gsub("[「」『』【】〔〕]", "")
+                        :gsub("%[.-%]", "")
+                        :gsub("%(.-%)", "")
+                        :gsub("%s+", " ")
+                        :match("^%s*(.-)%s*$")
+                    if cleaned ~= "" then
+                        if IsQuestActionText(cleaned) then
+                            table.insert(priorityTexts, cleaned)
+                        else
+                            table.insert(fallbackTexts, cleaned)
                         end
                     end
                 end
             end
+        end
 
-            -- Step 2: full or normalized name scan
-            for _, child in ipairs(npcCache) do
-                local childLower = child.Name:lower()
-                local normChild = normalize(child.Name)
-                -- full name in text
-                if lowerText:find(childLower, 1, true) then
-                    found = child.Name
-                    return true
-                end
-                -- normalized match (BoxingCoach == Boxing Coach)
-                if normText:find(normChild, 1, true) then
-                    found = child.Name
-                    return true
-                end
-                -- first word of npc name (Reimi from Reimi Sugimoto), min 4 chars
-                local firstName = childLower:match("^(%S+)")
-                if firstName and #firstName >= 4 and lowerText:find(firstName, 1, true) then
-                    found = child.Name
-                    return true
+        -- Try to extract NPC name from a quest action text.
+        -- For explicit "Talk to: X" style patterns, trust the extracted name directly.
+        -- Then try to match it to npc_cache for a clean canonical name.
+        local function tryExtract(text)
+            for _, pattern in ipairs(EXTRACT_PATTERNS) do
+                local m = text:match(pattern)
+                if m then
+                    local extracted = m:match("^%s*(.-)%s*$")
+                    if extracted and extracted ~= "" then
+                        local normExtracted = normalize(extracted)
+                        local lowerExtracted = extracted:lower()
+                        -- First: try to find canonical name in npc_cache
+                        for _, child in ipairs(npcCache) do
+                            local normChild  = normalize(child.Name)
+                            local childLower = child.Name:lower()
+                            if normChild == normExtracted
+                                or childLower == lowerExtracted
+                                or normExtracted:find(normChild, 1, true)
+                                or normChild:find(normExtracted, 1, true) then
+                                found = child.Name
+                                return true
+                            end
+                        end
+                        -- npc_cache empty or no match — trust the extracted text directly
+                        -- since it came from an explicit quest action label ("Talk to: X")
+                        found = extracted
+                        return true
+                    end
                 end
             end
             return false
         end
 
-        -- First: try objective label texts
-        for _, text in ipairs(textsToCheck) do
-            if tryMatch(text) then return end
+        -- PASS 1: extraction patterns on quest-action texts only (highest priority)
+        for _, text in ipairs(priorityTexts) do
+            if tryExtract(text) then return end
         end
 
-        -- Fallback 1: use quest marker titles (e.g. "Kobayashi" from questbrick)
+        -- PASS 2: extraction patterns on all remaining texts
+        for _, text in ipairs(fallbackTexts) do
+            if tryExtract(text) then return end
+        end
+
+        -- PASS 3: check if any quest marker title matches an npc_cache entry
+        -- Uses exact match first, then contains, so "Clinician" finds "Clinician"
         if not found then
             local markers = GetAllQuestMarkers()
             for _, m in ipairs(markers) do
                 if m.title and m.title ~= "Quest Marker" then
-                    if tryMatch(m.title) then return end
-                end
-            end
-        end
-
-        -- Fallback 2: scan ALL TextLabels inside task_holder for any npc_cache name
-        if not found then
-            local holder = WalkPath(gui, { "menu", "task_holder" })
-            if holder then
-                for _, obj in ipairs(holder:GetDescendants()) do
-                    if obj:IsA("TextLabel") and obj.Text ~= "" then
-                        local t = obj.Text:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                        if tryMatch(t) then return end
+                    local normTitle = normalize(m.title)
+                    -- Exact match
+                    for _, child in ipairs(npcCache) do
+                        if normalize(child.Name) == normTitle then
+                            found = child.Name
+                            return
+                        end
+                    end
+                    -- Contains match (marker title inside NPC name or vice versa)
+                    if not found then
+                        for _, child in ipairs(npcCache) do
+                            local normChild = normalize(child.Name)
+                            if normChild:find(normTitle, 1, true)
+                                or normTitle:find(normChild, 1, true) then
+                                found = child.Name
+                                return
+                            end
+                        end
                     end
                 end
             end
@@ -232,18 +239,62 @@ local SelectedNPC = ""
 
 local function GetNPCNames()
     local seen, names = {}, {}
-    for _, child in ipairs(ReplicatedStorage.assets.npc_cache:GetChildren()) do
-        if not seen[child.Name] then
-            seen[child.Name] = true
-            table.insert(names, child.Name)
+    -- Check npc_cache in ReplicatedStorage
+    local cache = ReplicatedStorage:FindFirstChild("assets")
+        and ReplicatedStorage.assets:FindFirstChild("npc_cache")
+    if cache then
+        for _, child in ipairs(cache:GetChildren()) do
+            if not seen[child.Name] then
+                seen[child.Name] = true
+                table.insert(names, child.Name)
+            end
+        end
+    end
+    -- Also check workspace.Npcs — NPCs move here when nearby
+    local wsNpcs = Workspace:FindFirstChild("Npcs")
+    if wsNpcs then
+        for _, child in ipairs(wsNpcs:GetChildren()) do
+            if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
+                if not seen[child.Name] then
+                    seen[child.Name] = true
+                    table.insert(names, child.Name)
+                end
+            end
         end
     end
     table.sort(names)
     return names
 end
 
-local npcNames = GetNPCNames()
-if #npcNames > 0 then SelectedNPC = npcNames[1] end
+-- Helper: find the npc_cache entry OR fall back to workspace.Npcs model
+local function FindNPCEntry(npcName)
+    local cache = ReplicatedStorage:FindFirstChild("assets")
+        and ReplicatedStorage.assets:FindFirstChild("npc_cache")
+    if cache then
+        local entry = cache:FindFirstChild(npcName)
+        if entry then return entry end
+    end
+    local wsNpcs = Workspace:FindFirstChild("Npcs")
+    if wsNpcs then
+        local entry = wsNpcs:FindFirstChild(npcName)
+        if entry then return entry end
+    end
+    return nil
+end
+
+-- npc_cache may not be ready yet — wait and retry
+local npcNames = {}
+task.spawn(function()
+    for _ = 1, 20 do
+        npcNames = GetNPCNames()
+        if #npcNames > 0 then break end
+        task.wait(0.5)
+    end
+    if #npcNames > 0 then
+        SelectedNPC = npcNames[1]
+        pcall(function() Options.NPCSelect:SetValues(npcNames) end)
+    end
+end)
 
 -- ──────────────────────────────────────────────
 -- Actions
@@ -254,48 +305,36 @@ local function FireDialogue(npcName, dialogueType)
         Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
         return
     end
-    local entry = ReplicatedStorage.assets.npc_cache[npcName]
+    local entry = FindNPCEntry(npcName)
     if not entry then
-        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache.", Time = 3 })
+        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache or workspace.Npcs.", Time = 3 })
         return
     end
-    ReplicatedStorage.requests.character.dialogue:FireServer(
-        ReplicatedStorage.assets.npc_cache[npcName],
-        dialogueType
-    )
+    ReplicatedStorage.requests.character.dialogue:FireServer(entry, dialogueType)
     Library:Notify({ Title = "Dialogue", Description = npcName, Time = 2 })
 end
 
-local function TeleportTo(npcName)
-    if not npcName or npcName == "" then
-        Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
-        return
-    end
-    local npc = ReplicatedStorage.assets.npc_cache[npcName]
-    if not npc then
-        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache.", Time = 3 })
-        return
-    end
+-- Teleport: cycles through quest markers only. No live workspace scanning.
+local function TeleportToQuest()
     local character = LocalPlayer.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
     if not root then
         Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
         return
     end
-    local npcPart = npc:FindFirstChild("HumanoidRootPart")
-        or npc.PrimaryPart
-        or npc:FindFirstChildOfClass("BasePart")
-    if npcPart then
-        root.CFrame = npcPart.CFrame + Vector3.new(0, 4, 0)
-    elseif typeof(npc) == "CFrame" then
-        root.CFrame = npc + Vector3.new(0, 4, 0)
-    elseif typeof(npc) == "Vector3" then
-        root.CFrame = CFrame.new(npc + Vector3.new(0, 4, 0))
-    else
-        Library:Notify({ Title = "Error", Description = "Cannot read position for " .. npcName, Time = 3 })
+
+    local markers = GetAllQuestMarkers()
+    if #markers == 0 then
+        Library:Notify({ Title = "Error", Description = "No quest markers found.", Time = 3 })
         return
     end
-    Library:Notify({ Title = "Teleported", Description = "Moved to " .. npcName, Time = 2 })
+
+    questMarkerIndex = (questMarkerIndex % #markers) + 1
+    local marker = markers[questMarkerIndex]
+    root.CFrame = marker.part.CFrame + Vector3.new(0, 4, 0)
+
+    local label = (#markers > 1) and (" (" .. questMarkerIndex .. "/" .. #markers .. ")") or ""
+    Library:Notify({ Title = "TP to Quest", Description = marker.title .. label, Time = 2 })
 end
 
 -- ──────────────────────────────────────────────
@@ -327,14 +366,17 @@ local function UpdateQuestLabel()
     local name = GetQuestNPCName()
     local markers = GetAllQuestMarkers()
     local markerText = #markers > 0 and (" | " .. #markers .. " marker(s)") or ""
-    QuestLabel:SetText(name and ("Quest NPC: " .. name .. markerText) or ("Quest NPC: not detected" .. markerText))
+    QuestLabel:SetText(
+        name and ("Quest NPC: " .. name .. markerText)
+              or ("Quest NPC: not detected" .. markerText)
+    )
 end
 
 UpdateQuestLabel()
 
 QuestBox:AddButton({
     Text = "Talk to Quest NPC",
-    Tooltip = "Fire dialogue for the active quest NPC",
+    Tooltip = "Fire dialogue for the detected quest NPC",
     Func = function()
         local name = GetQuestNPCName()
         if not name then
@@ -348,16 +390,16 @@ QuestBox:AddButton({
 
 QuestBox:AddButton({
     Text = "TP to Quest",
-    Tooltip = "Teleport to next quest marker. Always cycles.",
+    Tooltip = "Teleport to the next quest marker (cycles through all markers)",
     Func = function()
-        TeleportToNextQuestMarker()
+        TeleportToQuest()
         UpdateQuestLabel()
     end,
 })
 
 QuestBox:AddButton({
     Text = "Refresh Quest",
-    Tooltip = "Re-scan quest label and markers",
+    Tooltip = "Re-scan quest labels and markers",
     Func = function()
         questMarkerIndex = 0
         UpdateQuestLabel()
@@ -372,18 +414,18 @@ QuestBox:AddButton({
 
 QuestBox:AddButton({
     Text = "DEBUG: Print Quest Labels",
-    Tooltip = "Prints TextLabels and quest markers to console",
+    Tooltip = "Prints all PlayerGui TextLabels and quest markers to console",
     Func = function()
         local gui = LocalPlayer.PlayerGui
-        local holder = WalkPath(gui, { "menu", "task_holder" })
-        if not holder then
+        local taskHolder = WalkPath(gui, { "menu", "task_holder" })
+        if not taskHolder then
             print("[DEBUG] task_holder not found")
             Library:Notify({ Title = "DEBUG", Description = "task_holder not found!", Time = 4 })
             return
         end
-        print("[DEBUG] Scanning task_holder...")
+        print("[DEBUG] Scanning task_holder TextLabels only...")
         local count = 0
-        for _, obj in ipairs(holder:GetDescendants()) do
+        for _, obj in ipairs(taskHolder:GetDescendants()) do
             if obj:IsA("TextLabel") and obj.Text ~= "" then
                 count = count + 1
                 print("[DEBUG] Path: " .. obj:GetFullName())
@@ -395,7 +437,13 @@ QuestBox:AddButton({
         for i, m in ipairs(markers) do
             print("[DEBUG] Marker " .. i .. ": '" .. m.title .. "' @ " .. tostring(m.pos))
         end
-        Library:Notify({ Title = "DEBUG", Description = count .. " labels, " .. #markers .. " markers. Check console.", Time = 3 })
+        local detected = GetQuestNPCName()
+        print("[DEBUG] Detected NPC: " .. tostring(detected))
+        Library:Notify({
+            Title = "DEBUG",
+            Description = count .. " labels, " .. #markers .. " markers. Check console.",
+            Time = 3,
+        })
     end,
 })
 
@@ -426,7 +474,7 @@ QuestBox:AddButton({
 
 QuestBox:AddButton({
     Text = "TP to NPC",
-    Func = function() TeleportTo(SelectedNPC) end,
+    Func = function() TeleportToQuest() end,
 })
 
 -- ──────────────────────────────────────────────
