@@ -126,20 +126,29 @@ local function GetQuestNPCName()
             end
         end
 
+        -- Normalize: lowercase, strip spaces and underscores for fuzzy comparison
+        local function normalize(s)
+            return s:lower():gsub("[%s_%-]", "")
+        end
+
         local function tryMatch(text)
             local lowerText = text:lower()
+            local normText = normalize(text)
 
-            -- Step 1: pattern extraction (e.g. "Talk to: Reimi")
+            -- Step 1: pattern extraction (e.g. "Talk to: Boxing Coach")
             for _, pattern in ipairs(EXTRACT_PATTERNS) do
                 local m = text:match(pattern)
                 if m then
-                    local extracted = m:match("^%s*(.-)%s*$"):lower()
+                    local extracted = m:match("^%s*(.-)%s*$")
+                    local normExtracted = normalize(extracted)
+                    local lowerExtracted = extracted:lower()
                     for _, child in ipairs(npcCache) do
                         local childLower = child.Name:lower()
-                        -- exact match, npc name contains extracted, or extracted contains npc first word
-                        if childLower == extracted
-                            or childLower:find(extracted, 1, true)
-                            or extracted:find(childLower, 1, true) then
+                        local normChild = normalize(child.Name)
+                        if normChild == normExtracted
+                            or childLower == lowerExtracted
+                            or normChild:find(normExtracted, 1, true)
+                            or normExtracted:find(normChild, 1, true) then
                             found = child.Name
                             return true
                         end
@@ -147,15 +156,21 @@ local function GetQuestNPCName()
                 end
             end
 
-            -- Step 2: check if full npc name is in text, OR if npc first name is in text
+            -- Step 2: full or normalized name scan
             for _, child in ipairs(npcCache) do
                 local childLower = child.Name:lower()
-                -- full name match
+                local normChild = normalize(child.Name)
+                -- full name in text
                 if lowerText:find(childLower, 1, true) then
                     found = child.Name
                     return true
                 end
-                -- first word of npc name match (e.g. "Reimi" from "Reimi Sugimoto")
+                -- normalized match (BoxingCoach == Boxing Coach)
+                if normText:find(normChild, 1, true) then
+                    found = child.Name
+                    return true
+                end
+                -- first word of npc name (Reimi from Reimi Sugimoto), min 4 chars
                 local firstName = childLower:match("^(%S+)")
                 if firstName and #firstName >= 4 and lowerText:find(firstName, 1, true) then
                     found = child.Name
