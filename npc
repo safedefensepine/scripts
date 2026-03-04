@@ -1,0 +1,387 @@
+-- NPC Dialogue Script
+-- UI: Obsidian by deividcomsono
+-- https://github.com/deividcomsono/Obsidian
+
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- ──────────────────────────────────────────────
+-- Helpers
+-- ──────────────────────────────────────────────
+
+local function WalkPath(root, path)
+    local obj = root
+    for _, part in ipairs(path) do
+        obj = obj:FindFirstChild(part)
+        if not obj then return nil end
+    end
+    return obj
+end
+
+-- ──────────────────────────────────────────────
+-- Quest Markers — defined FIRST so GetQuestNPCName can use it
+-- Only counts Model instances named "questbrick" that are
+-- direct children of workspace.Effects
+-- ──────────────────────────────────────────────
+
+local questMarkerIndex = 0
+
+local function GetAllQuestMarkers()
+    local markers = {}
+    local effects = Workspace:FindFirstChild("Effects")
+    if not effects then return markers end
+
+    for _, brick in ipairs(effects:GetChildren()) do
+        if brick.Name == "questbrick" and brick:IsA("Model") then
+            local part = brick.PrimaryPart
+                or brick:FindFirstChildOfClass("BasePart")
+                or brick:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                local titleLabel = WalkPath(brick, { "Quest Marker", "Image", "Title" })
+                local title = "Quest Marker"
+                if titleLabel and titleLabel:IsA("TextLabel") and titleLabel.Text ~= "" then
+                    title = titleLabel.Text:gsub("%s*%(%d+m%)%s*$", ""):match("^%s*(.-)%s*$")
+                end
+                table.insert(markers, { part = part, title = title, pos = part.Position })
+            end
+        end
+    end
+
+    table.sort(markers, function(a, b)
+        if a.pos.X ~= b.pos.X then return a.pos.X < b.pos.X end
+        return a.pos.Z < b.pos.Z
+    end)
+
+    return markers
+end
+
+local function TeleportToNextQuestMarker()
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
+        return
+    end
+
+    local markers = GetAllQuestMarkers()
+    if #markers == 0 then
+        Library:Notify({ Title = "Error", Description = "No quest markers found.", Time = 3 })
+        return
+    end
+
+    -- Always cycle forward, no reset
+    questMarkerIndex = (questMarkerIndex % #markers) + 1
+
+    local marker = markers[questMarkerIndex]
+    root.CFrame = marker.part.CFrame + Vector3.new(0, 4, 0)
+
+    local label = (#markers > 1) and (" (" .. questMarkerIndex .. "/" .. #markers .. ")") or ""
+    Library:Notify({ Title = "TP to Quest", Description = marker.title .. label, Time = 2 })
+end
+
+-- ──────────────────────────────────────────────
+-- Quest NPC Detection
+-- Reads objective label paths only — does NOT use marker titles
+-- so NPCs are never mistakenly used as markers
+-- ──────────────────────────────────────────────
+
+local EXTRACT_PATTERNS = {
+    "[Tt]alk [Tt]o:%s*([%a][%a%s]*[%a])",
+    "[Ss]peak [Tt]o:%s*([%a][%a%s]*[%a])",
+    "[Ss]peak [Ww]ith:%s*([%a][%a%s]*[%a])",
+    "[Ee]scort:%s*([%a][%a%s]*[%a])",
+    "[Pp]rotect:%s*([%a][%a%s]*[%a])",
+    "[Vv]isit:%s*([%a][%a%s]*[%a])",
+    "[Ii]nteract [Ww]ith:%s*([%a][%a%s]*[%a])",
+    "[Tt]alk [Tt]o%s+([%u][%a]+)",
+    "[Ss]peak [Tt]o%s+([%u][%a]+)",
+    "[Ff]ind%s+([%u][%a]+)",
+}
+
+local OBJECTIVE_PATHS = {
+    { "menu", "task_holder", "holder", "newobjective", "ScrollingFrame", "holder", "singleobjective", "TextLabel" },
+    { "menu", "task_holder", "holder", "newobjective", "ScrollingFrame", "holder", "multiobjective", "text", "TextLabel" },
+}
+
+local function GetQuestNPCName()
+    local found = nil
+    pcall(function()
+        local npcCache = ReplicatedStorage.assets.npc_cache:GetChildren()
+        local gui = LocalPlayer.PlayerGui
+
+        -- Collect texts from objective label paths
+        local textsToCheck = {}
+        for _, pathDef in ipairs(OBJECTIVE_PATHS) do
+            local label = WalkPath(gui, pathDef)
+            if label and label:IsA("TextLabel") and label.Text ~= "" then
+                local cleaned = label.Text:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                table.insert(textsToCheck, cleaned)
+            end
+        end
+
+        for _, text in ipairs(textsToCheck) do
+            -- Step 1: pattern extraction (e.g. "Talk to: Kobayashi")
+            for _, pattern in ipairs(EXTRACT_PATTERNS) do
+                local m = text:match(pattern)
+                if m then
+                    local extracted = m:match("^%s*(.-)%s*$"):lower()
+                    for _, child in ipairs(npcCache) do
+                        if child.Name:lower() == extracted or child.Name:lower():find(extracted, 1, true) then
+                            found = child.Name
+                            return
+                        end
+                    end
+                end
+            end
+            -- Step 2: scan text for any npc_cache name
+            local lowerText = text:lower()
+            for _, child in ipairs(npcCache) do
+                if lowerText:find(child.Name:lower(), 1, true) then
+                    found = child.Name
+                    return
+                end
+            end
+        end
+    end)
+    return found
+end
+
+-- ──────────────────────────────────────────────
+-- State
+-- ──────────────────────────────────────────────
+
+local SelectedNPC = ""
+
+local function GetNPCNames()
+    local seen, names = {}, {}
+    for _, child in ipairs(ReplicatedStorage.assets.npc_cache:GetChildren()) do
+        if not seen[child.Name] then
+            seen[child.Name] = true
+            table.insert(names, child.Name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+local npcNames = GetNPCNames()
+if #npcNames > 0 then SelectedNPC = npcNames[1] end
+
+-- ──────────────────────────────────────────────
+-- Actions
+-- ──────────────────────────────────────────────
+
+local function FireDialogue(npcName, dialogueType)
+    if not npcName or npcName == "" then
+        Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
+        return
+    end
+    local entry = ReplicatedStorage.assets.npc_cache[npcName]
+    if not entry then
+        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache.", Time = 3 })
+        return
+    end
+    ReplicatedStorage.requests.character.dialogue:FireServer(
+        ReplicatedStorage.assets.npc_cache[npcName],
+        dialogueType
+    )
+    Library:Notify({ Title = "Dialogue", Description = npcName, Time = 2 })
+end
+
+local function TeleportTo(npcName)
+    if not npcName or npcName == "" then
+        Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
+        return
+    end
+    local npc = ReplicatedStorage.assets.npc_cache[npcName]
+    if not npc then
+        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache.", Time = 3 })
+        return
+    end
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
+        return
+    end
+    local npcPart = npc:FindFirstChild("HumanoidRootPart")
+        or npc.PrimaryPart
+        or npc:FindFirstChildOfClass("BasePart")
+    if npcPart then
+        root.CFrame = npcPart.CFrame + Vector3.new(0, 4, 0)
+    elseif typeof(npc) == "CFrame" then
+        root.CFrame = npc + Vector3.new(0, 4, 0)
+    elseif typeof(npc) == "Vector3" then
+        root.CFrame = CFrame.new(npc + Vector3.new(0, 4, 0))
+    else
+        Library:Notify({ Title = "Error", Description = "Cannot read position for " .. npcName, Time = 3 })
+        return
+    end
+    Library:Notify({ Title = "Teleported", Description = "Moved to " .. npcName, Time = 2 })
+end
+
+-- ──────────────────────────────────────────────
+-- Window
+-- ──────────────────────────────────────────────
+
+local Window = Library:CreateWindow({
+    Title = "NPC Dialogue",
+    Footer = "dialogue script",
+    Center = true,
+    AutoShow = true,
+    ToggleKeybind = Enum.KeyCode.RightControl,
+})
+
+local Tabs = {
+    Main = Window:AddTab("NPCs", "user"),
+    ["UI Settings"] = Window:AddTab("UI & Settings", "settings"),
+}
+
+-- ──────────────────────────────────────────────
+-- Left — Current Quest
+-- ──────────────────────────────────────────────
+
+local QuestBox = Tabs.Main:AddLeftGroupbox("Current Quest")
+
+local QuestLabel = QuestBox:AddLabel("Quest NPC: detecting...")
+
+local function UpdateQuestLabel()
+    local name = GetQuestNPCName()
+    local markers = GetAllQuestMarkers()
+    local markerText = #markers > 0 and (" | " .. #markers .. " marker(s)") or ""
+    QuestLabel:SetText(name and ("Quest NPC: " .. name .. markerText) or ("Quest NPC: not detected" .. markerText))
+end
+
+UpdateQuestLabel()
+
+QuestBox:AddButton({
+    Text = "Talk to Quest NPC",
+    Tooltip = "Fire dialogue for the active quest NPC",
+    Func = function()
+        local name = GetQuestNPCName()
+        if not name then
+            Library:Notify({ Title = "Error", Description = "No quest NPC detected.", Time = 3 })
+            return
+        end
+        UpdateQuestLabel()
+        FireDialogue(name, 1)
+    end,
+})
+
+QuestBox:AddButton({
+    Text = "TP to Quest",
+    Tooltip = "Teleport to next quest marker. Always cycles.",
+    Func = function()
+        TeleportToNextQuestMarker()
+        UpdateQuestLabel()
+    end,
+})
+
+QuestBox:AddButton({
+    Text = "Refresh Quest",
+    Tooltip = "Re-scan quest label and markers",
+    Func = function()
+        questMarkerIndex = 0
+        UpdateQuestLabel()
+        local markers = GetAllQuestMarkers()
+        Library:Notify({
+            Title = "Refreshed",
+            Description = #markers .. " quest marker(s) found.",
+            Time = 3,
+        })
+    end,
+})
+
+QuestBox:AddButton({
+    Text = "DEBUG: Print Quest Labels",
+    Tooltip = "Prints TextLabels and quest markers to console",
+    Func = function()
+        local gui = LocalPlayer.PlayerGui
+        local holder = WalkPath(gui, { "menu", "task_holder" })
+        if not holder then
+            print("[DEBUG] task_holder not found")
+            Library:Notify({ Title = "DEBUG", Description = "task_holder not found!", Time = 4 })
+            return
+        end
+        print("[DEBUG] Scanning task_holder...")
+        local count = 0
+        for _, obj in ipairs(holder:GetDescendants()) do
+            if obj:IsA("TextLabel") and obj.Text ~= "" then
+                count = count + 1
+                print("[DEBUG] Path: " .. obj:GetFullName())
+                print("[DEBUG] Text: " .. obj.Text)
+            end
+        end
+        local markers = GetAllQuestMarkers()
+        print("[DEBUG] Quest markers: " .. #markers)
+        for i, m in ipairs(markers) do
+            print("[DEBUG] Marker " .. i .. ": '" .. m.title .. "' @ " .. tostring(m.pos))
+        end
+        Library:Notify({ Title = "DEBUG", Description = count .. " labels, " .. #markers .. " markers. Check console.", Time = 3 })
+    end,
+})
+
+QuestBox:AddDivider()
+
+-- ──────────────────────────────────────────────
+-- Left — Manual Select
+-- ──────────────────────────────────────────────
+
+QuestBox:AddLabel("— Manual Select —")
+
+QuestBox:AddDropdown("NPCSelect", {
+    Values = npcNames,
+    Default = 1,
+    Text = "Select NPC",
+    Searchable = true,
+    Callback = function(Value)
+        SelectedNPC = Value
+    end,
+})
+
+QuestBox:AddDivider()
+
+QuestBox:AddButton({
+    Text = "Talk to NPC",
+    Func = function() FireDialogue(SelectedNPC, 1) end,
+})
+
+QuestBox:AddButton({
+    Text = "TP to NPC",
+    Func = function() TeleportTo(SelectedNPC) end,
+})
+
+-- ──────────────────────────────────────────────
+-- Right — Options
+-- ──────────────────────────────────────────────
+
+local RightBox = Tabs.Main:AddRightGroupbox("Options")
+
+RightBox:AddButton({
+    Text = "Refresh NPC List",
+    Func = function()
+        local newNames = GetNPCNames()
+        Options.NPCSelect:SetValues(newNames)
+        if #newNames > 0 then SelectedNPC = newNames[1] end
+        Library:Notify({ Title = "Refreshed", Description = #newNames .. " NPCs found.", Time = 3 })
+    end,
+})
+
+-- ──────────────────────────────────────────────
+-- UI Settings
+-- ──────────────────────────────────────────────
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+ThemeManager:SetFolder("NPCDialogueScript")
+SaveManager:SetFolder("NPCDialogueScript")
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
