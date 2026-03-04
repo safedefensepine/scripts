@@ -126,7 +126,7 @@ local function GetQuestNPCName()
             end
         end
 
-        for _, text in ipairs(textsToCheck) do
+        local function tryMatch(text)
             -- Step 1: pattern extraction (e.g. "Talk to: Kobayashi")
             for _, pattern in ipairs(EXTRACT_PATTERNS) do
                 local m = text:match(pattern)
@@ -135,7 +135,7 @@ local function GetQuestNPCName()
                     for _, child in ipairs(npcCache) do
                         if child.Name:lower() == extracted or child.Name:lower():find(extracted, 1, true) then
                             found = child.Name
-                            return
+                            return true
                         end
                     end
                 end
@@ -145,7 +145,23 @@ local function GetQuestNPCName()
             for _, child in ipairs(npcCache) do
                 if lowerText:find(child.Name:lower(), 1, true) then
                     found = child.Name
-                    return
+                    return true
+                end
+            end
+            return false
+        end
+
+        -- First: try objective label texts
+        for _, text in ipairs(textsToCheck) do
+            if tryMatch(text) then return end
+        end
+
+        -- Fallback: use quest marker titles (e.g. "Kobayashi" from questbrick)
+        if not found then
+            local markers = GetAllQuestMarkers()
+            for _, m in ipairs(markers) do
+                if m.title and m.title ~= "Quest Marker" then
+                    if tryMatch(m.title) then return end
                 end
             end
         end
