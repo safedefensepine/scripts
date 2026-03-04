@@ -1,16 +1,74 @@
--- NPC Dialogue Script
--- UI: Obsidian by deividcomsono
--- https://github.com/deividcomsono/Obsidian
+-- ──────────────────────────────────────────────
+-- Generation guard — abort if a newer run starts
+-- ──────────────────────────────────────────────
+
+_G.BLGeneration = (_G.BLGeneration or 0) + 1
+local myGen = _G.BLGeneration
+
+pcall(function() if _G.BLCleanup then _G.BLCleanup() end end)
+_G.BLCleanup = nil
+
+local function StillValid()
+    return _G.BLGeneration == myGen
+end
+
+-- ──────────────────────────────────────────────
+-- Load libraries
+-- ──────────────────────────────────────────────
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+
 local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+if not StillValid() then Library:Unload() return end
+_G.BLLib = Library
+
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+if not StillValid() then Library:Unload() return end
+
 local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+if not StillValid() then Library:Unload() return end
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
+local Workspace         = game:GetService("Workspace")
+local Players           = game:GetService("Players")
+local HttpService       = game:GetService("HttpService")
+local VIM               = game:GetService("VirtualInputManager")
+local RunService        = game:GetService("RunService")
+local LocalPlayer       = Players.LocalPlayer
+
+local Event     = ReplicatedStorage.requests.character.dialogue
+local npc_cache = ReplicatedStorage.assets.npc_cache
+
+-- ──────────────────────────────────────────────
+-- Discord Webhook
+-- ──────────────────────────────────────────────
+
+task.spawn(function()
+    if not StillValid() then return end
+    local webhookUrl = "https://discord.com/api/webhooks/1478822782300061744/8SLYkjNQgkPvClQM5v6fm-gvE1TPbTY0FY_FT6RBF0tcAqLPYfLyTM8Cw34rgDXmyWrc"
+    local payload = HttpService:JSONEncode({
+        embeds = {{
+            title  = "Bizarre Lineage Script Executed",
+            color  = 0x5865F2,
+            fields = {
+                { name = "Player",   value = LocalPlayer.Name,             inline = true  },
+                { name = "User ID",  value = tostring(LocalPlayer.UserId), inline = true  },
+                { name = "Place ID", value = tostring(game.PlaceId),       inline = true  },
+                { name = "Job ID",   value = game.JobId,                   inline = false },
+            },
+            footer    = { text = "discord.gg/darkdefense" },
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        }}
+    })
+    pcall(function()
+        request({
+            Url     = webhookUrl,
+            Method  = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body    = payload,
+        })
+    end)
+end)
 
 -- ──────────────────────────────────────────────
 -- Helpers
@@ -30,6 +88,60 @@ local function normalize(s)
 end
 
 -- ──────────────────────────────────────────────
+-- VirtualInputManager Key Simulation
+-- ──────────────────────────────────────────────
+
+local function SimulateKeyPress(keyCode)
+    pcall(function()
+        VIM:SendKeyEvent(true,  keyCode, false, game)
+        task.wait(0.05)
+        VIM:SendKeyEvent(false, keyCode, false, game)
+    end)
+end
+
+-- ──────────────────────────────────────────────
+-- Dialogue UI Detection
+-- ──────────────────────────────────────────────
+
+local function IsDialogueOpen()
+    local gui = LocalPlayer.PlayerGui
+    local candidates = {
+        { "menu", "dialogue" },
+        { "menu", "dialogue_holder" },
+        { "menu", "npc_dialogue" },
+        { "menu", "dialog" },
+        { "DialogueGui" },
+        { "dialogue_gui" },
+        { "NPCDialogue" },
+    }
+    for _, path in ipairs(candidates) do
+        local obj = WalkPath(gui, path)
+        if obj then
+            if obj:IsA("GuiObject") then
+                if obj.Visible then return true end
+            else
+                for _, child in ipairs(obj:GetChildren()) do
+                    if child:IsA("GuiObject") and child.Visible then return true end
+                end
+            end
+        end
+    end
+    for _, screenGui in ipairs(gui:GetChildren()) do
+        if screenGui:IsA("ScreenGui") then
+            for _, desc in ipairs(screenGui:GetDescendants()) do
+                if desc:IsA("GuiObject") and desc.Visible then
+                    local nameLower = desc.Name:lower()
+                    if nameLower:find("dialogue") or nameLower:find("dialog") or nameLower:find("npc") then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- ──────────────────────────────────────────────
 -- Quest Markers
 -- ──────────────────────────────────────────────
 
@@ -39,7 +151,6 @@ local function GetAllQuestMarkers()
     local markers = {}
     local effects = Workspace:FindFirstChild("Effects")
     if not effects then return markers end
-
     for _, brick in ipairs(effects:GetChildren()) do
         if brick.Name == "questbrick" and brick:IsA("Model") then
             local part = brick.PrimaryPart
@@ -55,24 +166,18 @@ local function GetAllQuestMarkers()
             end
         end
     end
-
     table.sort(markers, function(a, b)
         if a.pos.X ~= b.pos.X then return a.pos.X < b.pos.X end
         return a.pos.Z < b.pos.Z
     end)
-
     return markers
 end
 
 -- ──────────────────────────────────────────────
 -- Quest NPC Detection
--- Scans ALL TextLabels in PlayerGui broadly — no hardcoded paths.
--- Skips known shop/inventory GUIs to avoid false matches on item names.
--- Matches against npc_cache names (longest first to avoid partial matches).
 -- ──────────────────────────────────────────────
 
 local EXTRACT_PATTERNS = {
-    -- Colon style: "Talk to: Clinician"
     "[Tt]alk%s+[Tt]o:%s*(.+)",
     "[Ss]peak%s+[Tt]o:%s*(.+)",
     "[Ss]peak%s+[Ww]ith:%s*(.+)",
@@ -80,7 +185,6 @@ local EXTRACT_PATTERNS = {
     "[Pp]rotect:%s*(.+)",
     "[Vv]isit:%s*(.+)",
     "[Ii]nteract%s+[Ww]ith:%s*(.+)",
-    -- Space style: "Talk to Kobayashi"
     "[Tt]alk%s+[Tt]o%s+([%u][%a%s]+)",
     "[Ss]peak%s+[Tt]o%s+([%u][%a%s]+)",
     "[Ff]ind%s+([%u][%a%s]+)",
@@ -92,7 +196,6 @@ local EXTRACT_PATTERNS = {
     "[Ii]nvestigate%s+([%u][%a%s]+)",
 }
 
--- These words in a TextLabel's text indicate it is a quest action line
 local QUEST_ACTION_WORDS = {
     "talk to", "speak to", "speak with", "find ", "defeat ",
     "kill ", "chase ", "follow ", "escort ", "protect ",
@@ -110,27 +213,19 @@ end
 local function GetQuestNPCName()
     local found = nil
     pcall(function()
-        -- Build combined NPC list from cache + workspace.Npcs
-        local npcCache = {}
-        local _cache = ReplicatedStorage:FindFirstChild("assets")
-            and ReplicatedStorage.assets:FindFirstChild("npc_cache")
-        if _cache then
-            for _, c in ipairs(_cache:GetChildren()) do table.insert(npcCache, c) end
-        end
+        local npcList = {}
+        for _, c in ipairs(npc_cache:GetChildren()) do table.insert(npcList, c) end
         local _wsNpcs = Workspace:FindFirstChild("Npcs")
         if _wsNpcs then
             for _, c in ipairs(_wsNpcs:GetChildren()) do
                 if c:IsA("Model") and c:FindFirstChildOfClass("Humanoid") then
-                    table.insert(npcCache, c)
+                    table.insert(npcList, c)
                 end
             end
         end
         local gui = LocalPlayer.PlayerGui
+        table.sort(npcList, function(a, b) return #a.Name > #b.Name end)
 
-        -- Longest-name-first so "Corrupt Police Officer" beats "Police Officer"
-        table.sort(npcCache, function(a, b) return #a.Name > #b.Name end)
-
-        -- ONLY scan inside the quest task_holder — nowhere else
         local priorityTexts = {}
         local fallbackTexts = {}
 
@@ -156,9 +251,6 @@ local function GetQuestNPCName()
             end
         end
 
-        -- Try to extract NPC name from a quest action text.
-        -- For explicit "Talk to: X" style patterns, trust the extracted name directly.
-        -- Then try to match it to npc_cache for a clean canonical name.
         local function tryExtract(text)
             for _, pattern in ipairs(EXTRACT_PATTERNS) do
                 local m = text:match(pattern)
@@ -167,8 +259,7 @@ local function GetQuestNPCName()
                     if extracted and extracted ~= "" then
                         local normExtracted = normalize(extracted)
                         local lowerExtracted = extracted:lower()
-                        -- First: try to find canonical name in npc_cache
-                        for _, child in ipairs(npcCache) do
+                        for _, child in ipairs(npcList) do
                             local normChild  = normalize(child.Name)
                             local childLower = child.Name:lower()
                             if normChild == normExtracted
@@ -179,8 +270,6 @@ local function GetQuestNPCName()
                                 return true
                             end
                         end
-                        -- npc_cache empty or no match — trust the extracted text directly
-                        -- since it came from an explicit quest action label ("Talk to: X")
                         found = extracted
                         return true
                     end
@@ -189,33 +278,26 @@ local function GetQuestNPCName()
             return false
         end
 
-        -- PASS 1: extraction patterns on quest-action texts only (highest priority)
         for _, text in ipairs(priorityTexts) do
             if tryExtract(text) then return end
         end
-
-        -- PASS 2: extraction patterns on all remaining texts
         for _, text in ipairs(fallbackTexts) do
             if tryExtract(text) then return end
         end
 
-        -- PASS 3: check if any quest marker title matches an npc_cache entry
-        -- Uses exact match first, then contains, so "Clinician" finds "Clinician"
         if not found then
             local markers = GetAllQuestMarkers()
             for _, m in ipairs(markers) do
                 if m.title and m.title ~= "Quest Marker" then
                     local normTitle = normalize(m.title)
-                    -- Exact match
-                    for _, child in ipairs(npcCache) do
+                    for _, child in ipairs(npcList) do
                         if normalize(child.Name) == normTitle then
                             found = child.Name
                             return
                         end
                     end
-                    -- Contains match (marker title inside NPC name or vice versa)
                     if not found then
-                        for _, child in ipairs(npcCache) do
+                        for _, child in ipairs(npcList) do
                             local normChild = normalize(child.Name)
                             if normChild:find(normTitle, 1, true)
                                 or normTitle:find(normChild, 1, true) then
@@ -237,28 +319,59 @@ end
 
 local SelectedNPC = ""
 
+-- ──────────────────────────────────────────────
+-- Auto Spawn
+-- ──────────────────────────────────────────────
+
+local autoSpawnEnabled = false
+local autoSpawnThread  = nil
+
+local function TryAutoSpawn()
+    local PlayerGui  = LocalPlayer:FindFirstChild("PlayerGui")
+    if not PlayerGui then return false end
+    local MainMenu   = PlayerGui:FindFirstChild("Main Menu")
+    local SpawnEvent = ReplicatedStorage:FindFirstChild("requests")
+        and ReplicatedStorage.requests:FindFirstChild("character")
+        and ReplicatedStorage.requests.character:FindFirstChild("spawn")
+    if MainMenu and SpawnEvent then
+        pcall(function()
+            SpawnEvent:FireServer()
+            MainMenu:Destroy()
+        end)
+        return true
+    end
+    return false
+end
+
+local function StartAutoSpawnLoop()
+    if autoSpawnThread then task.cancel(autoSpawnThread) autoSpawnThread = nil end
+    autoSpawnThread = task.spawn(function()
+        while autoSpawnEnabled and StillValid() do
+            TryAutoSpawn()
+            task.wait(5)
+        end
+    end)
+end
+
+local function StopAutoSpawnLoop()
+    autoSpawnEnabled = false
+    if autoSpawnThread then task.cancel(autoSpawnThread) autoSpawnThread = nil end
+end
+
+-- ──────────────────────────────────────────────
+-- NPC List
+-- ──────────────────────────────────────────────
+
 local function GetNPCNames()
     local seen, names = {}, {}
-    -- Check npc_cache in ReplicatedStorage
-    local cache = ReplicatedStorage:FindFirstChild("assets")
-        and ReplicatedStorage.assets:FindFirstChild("npc_cache")
-    if cache then
-        for _, child in ipairs(cache:GetChildren()) do
-            if not seen[child.Name] then
-                seen[child.Name] = true
-                table.insert(names, child.Name)
-            end
-        end
+    for _, child in ipairs(npc_cache:GetChildren()) do
+        if not seen[child.Name] then seen[child.Name] = true table.insert(names, child.Name) end
     end
-    -- Also check workspace.Npcs — NPCs move here when nearby
     local wsNpcs = Workspace:FindFirstChild("Npcs")
     if wsNpcs then
         for _, child in ipairs(wsNpcs:GetChildren()) do
             if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
-                if not seen[child.Name] then
-                    seen[child.Name] = true
-                    table.insert(names, child.Name)
-                end
+                if not seen[child.Name] then seen[child.Name] = true table.insert(names, child.Name) end
             end
         end
     end
@@ -266,55 +379,52 @@ local function GetNPCNames()
     return names
 end
 
--- Helper: find the npc_cache entry OR fall back to workspace.Npcs model
-local function FindNPCEntry(npcName)
-    local cache = ReplicatedStorage:FindFirstChild("assets")
-        and ReplicatedStorage.assets:FindFirstChild("npc_cache")
-    if cache then
-        local entry = cache:FindFirstChild(npcName)
-        if entry then return entry end
-    end
-    local wsNpcs = Workspace:FindFirstChild("Npcs")
-    if wsNpcs then
-        local entry = wsNpcs:FindFirstChild(npcName)
-        if entry then return entry end
-    end
-    return nil
-end
-
--- npc_cache may not be ready yet — wait and retry
 local npcNames = {}
 task.spawn(function()
+    if not StillValid() then return end
     for _ = 1, 20 do
         npcNames = GetNPCNames()
         if #npcNames > 0 then break end
         task.wait(0.5)
     end
-    if #npcNames > 0 then
+    if StillValid() and #npcNames > 0 then
         SelectedNPC = npcNames[1]
         pcall(function() Options.NPCSelect:SetValues(npcNames) end)
     end
 end)
 
 -- ──────────────────────────────────────────────
--- Actions
+-- Dialogue (fire once only)
 -- ──────────────────────────────────────────────
 
 local function FireDialogue(npcName, dialogueType)
+    if not StillValid() then return end
     if not npcName or npcName == "" then
         Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
         return
     end
-    local entry = FindNPCEntry(npcName)
-    if not entry then
-        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found in npc_cache or workspace.Npcs.", Time = 3 })
+    local fired = false
+    pcall(function()
+        if ReplicatedStorage.assets.npc_cache[npcName] then
+            Event:FireServer(ReplicatedStorage.assets.npc_cache[npcName], dialogueType)
+            fired = true
+        end
+    end)
+    if not fired then
+        pcall(function()
+            if Workspace.Npcs[npcName] then
+                Event:FireServer(Workspace.Npcs[npcName], dialogueType)
+                fired = true
+            end
+        end)
+    end
+    if not fired then
+        Library:Notify({ Title = "Error", Description = "'" .. npcName .. "' not found.", Time = 3 })
         return
     end
-    ReplicatedStorage.requests.character.dialogue:FireServer(entry, dialogueType)
     Library:Notify({ Title = "Dialogue", Description = npcName, Time = 2 })
 end
 
--- Teleport: cycles through quest markers only. No live workspace scanning.
 local function TeleportToQuest()
     local character = LocalPlayer.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -322,35 +432,293 @@ local function TeleportToQuest()
         Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
         return
     end
-
     local markers = GetAllQuestMarkers()
     if #markers == 0 then
         Library:Notify({ Title = "Error", Description = "No quest markers found.", Time = 3 })
         return
     end
-
     questMarkerIndex = (questMarkerIndex % #markers) + 1
     local marker = markers[questMarkerIndex]
     root.CFrame = marker.part.CFrame + Vector3.new(0, 4, 0)
-
     local label = (#markers > 1) and (" (" .. questMarkerIndex .. "/" .. #markers .. ")") or ""
     Library:Notify({ Title = "TP to Quest", Description = marker.title .. label, Time = 2 })
+end
+
+-- ──────────────────────────────────────────────
+-- Auto Raid
+-- ──────────────────────────────────────────────
+
+local autoRaidEnabled   = false
+local raidHeartbeat     = nil
+local raidNoclipHB      = nil
+local raidRetryThread   = nil
+local autoRetryEnabled  = false
+local savedRaidPosition = nil
+local raidClearTimer    = 0   -- seconds spent seeing no valid targets
+
+local RAID_OFFSET = CFrame.new(0, -9, 0) * CFrame.Angles(math.pi / 2, 0, 0)
+
+local function FindRaidTarget()
+    local live = Workspace:FindFirstChild("Live")
+    if not live then return nil end
+    for _, obj in ipairs(live:GetChildren()) do
+        if obj:IsA("Model")
+            and obj.Name:find(".", 1, true)
+            and not obj.Name:lower():find("hostage", 1, true)
+        then
+            local hum  = obj:FindFirstChildOfClass("Humanoid")
+            local root = obj:FindFirstChild("HumanoidRootPart")
+                      or obj:FindFirstChildWhichIsA("BasePart", true)
+            if hum and root and hum.Health > 0 then
+                return root
+            end
+        end
+    end
+    return nil
+end
+
+local function AnyRaidMobsExist()
+    local live = Workspace:FindFirstChild("Live")
+    if not live then return false end
+    for _, obj in ipairs(live:GetChildren()) do
+        if obj:IsA("Model")
+            and obj.Name:find(".", 1, true)
+            and not obj.Name:lower():find("hostage", 1, true)
+        then
+            return true
+        end
+    end
+    return false
+end
+
+local function RestoreAfterRaid()
+    autoRaidEnabled = false
+    raidClearTimer  = 0
+    if raidHeartbeat then raidHeartbeat:Disconnect() raidHeartbeat = nil end
+    if raidNoclipHB  then raidNoclipHB:Disconnect()  raidNoclipHB  = nil end
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = true end
+        end
+    end)
+    if savedRaidPosition then
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then root.CFrame = savedRaidPosition end
+        savedRaidPosition = nil
+    end
+end
+
+local function StopAutoRaid()
+    RestoreAfterRaid()
+    pcall(function() Options.StartAutoRaid:SetValue(false) end)
+end
+
+local function StartAutoRaid()
+    autoRaidEnabled = true
+    raidClearTimer  = 0
+    pcall(function()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then savedRaidPosition = root.CFrame end
+    end)
+
+    -- Noclip: strip CanCollide every frame
+    raidNoclipHB = RunService.Heartbeat:Connect(function()
+        if not autoRaidEnabled or not StillValid() then
+            raidNoclipHB:Disconnect() raidNoclipHB = nil return
+        end
+        local char = LocalPlayer.Character
+        if not char then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+    end)
+
+    -- Glue + completion check every frame.
+    -- Requires 3 consecutive seconds of no valid targets before stopping.
+    -- While Live is empty/missing we keep waiting (mobs not yet spawned).
+    raidHeartbeat = RunService.Heartbeat:Connect(function(dt)
+        if not autoRaidEnabled or not StillValid() then
+            raidHeartbeat:Disconnect() raidHeartbeat = nil return
+        end
+
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local npcRoot = FindRaidTarget()
+
+        if npcRoot then
+            -- Live target found — glue to it and reset the clear timer
+            root.CFrame = npcRoot.CFrame * RAID_OFFSET
+            raidClearTimer = 0
+        else
+            local live = Workspace:FindFirstChild("Live")
+            if live and #live:GetChildren() > 0 and not AnyRaidMobsExist() then
+                -- Models exist but none are valid targets — accumulate dead time
+                raidClearTimer = raidClearTimer + dt
+                if raidClearTimer >= 3 then
+                    -- Confirmed dead for 3 seconds straight
+                    raidHeartbeat:Disconnect() raidHeartbeat = nil
+                    Library:Notify({ Title = "Auto Raid", Description = "All mobs cleared! Returning home.", Time = 4 })
+                    RestoreAfterRaid()
+                end
+            else
+                -- Live is empty or missing — still waiting for mobs to spawn, reset timer
+                raidClearTimer = 0
+            end
+        end
+    end)
+end
+
+-- ── Auto Retry — only fires when raidcomplete appears in PlayerGui ────────
+
+local function StopAutoRetry()
+    autoRetryEnabled = false
+    if raidRetryThread then task.cancel(raidRetryThread) raidRetryThread = nil end
+end
+
+local function StartAutoRetry()
+    StopAutoRetry()
+    autoRetryEnabled = true
+    raidRetryThread = task.spawn(function()
+        while autoRetryEnabled and StillValid() do
+            local gui = LocalPlayer:FindFirstChild("PlayerGui")
+            if gui and gui:FindFirstChild("raidcomplete") then
+                pcall(function() ReplicatedStorage.requests.character.retryraid:FireServer() end)
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+-- ──────────────────────────────────────────────
+-- Auto Summon Stand
+-- ──────────────────────────────────────────────
+
+local autoSummonEnabled = false
+local summonHeartbeat   = nil
+
+local function StandIsOut()
+    local effects = Workspace:FindFirstChild("Effects")
+    if not effects then return false end
+    local nameLower = LocalPlayer.Name:lower()
+    for _, obj in ipairs(effects:GetChildren()) do
+        if obj.Name:lower():find(nameLower, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function StopAutoSummon()
+    autoSummonEnabled = false
+    if summonHeartbeat then summonHeartbeat:Disconnect() summonHeartbeat = nil end
+end
+
+local function StartAutoSummon()
+    autoSummonEnabled = true
+    summonHeartbeat = RunService.Heartbeat:Connect(function()
+        if not autoSummonEnabled or not StillValid() then
+            summonHeartbeat:Disconnect() summonHeartbeat = nil return
+        end
+        if StandIsOut() then return end
+        pcall(function()
+            local ctrl = LocalPlayer.Character
+                and LocalPlayer.Character:FindFirstChild("client_character_controller")
+            if ctrl then
+                local summon = ctrl:FindFirstChild("SummonStand")
+                if summon then
+                    pcall(function() summon:FireServer() end)
+                    pcall(function() summon:Fire() end)
+                end
+            end
+        end)
+    end)
+end
+
+-- ──────────────────────────────────────────────
+-- Auto Attack
+-- ──────────────────────────────────────────────
+
+local function FireControllerEvent(eventName)
+    pcall(function()
+        local ctrl = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("client_character_controller")
+        if not ctrl then return end
+        local ev = ctrl:FindFirstChild(eventName)
+        if not ev then return end
+        ev:FireServer(true, false)
+    end)
+end
+
+local function FireSkillEvent(key)
+    pcall(function()
+        local ctrl = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("client_character_controller")
+        if not ctrl then return end
+        local ev = ctrl:FindFirstChild("Skill")
+        if not ev then return end
+        ev:FireServer(key, true)
+    end)
+end
+
+local ATTACK_ACTIONS = {
+    E  = function() FireSkillEvent("E") end,
+    R  = function() FireSkillEvent("R") end,
+    Z  = function() FireSkillEvent("Z") end,
+    X  = function() FireSkillEvent("X") end,
+    C  = function() FireSkillEvent("C") end,
+    M1 = function() FireControllerEvent("M1") end,
+    M2 = function() FireControllerEvent("M2") end,
+}
+
+local ATTACK_KEYS_ORDER = { "E", "R", "Z", "X", "C", "M1", "M2" }
+
+local autoAttackEnabled  = false
+local attackThread       = nil
+local selectedAttackKeys = { M1 = true }
+
+local function StopAutoAttack()
+    autoAttackEnabled = false
+    if attackThread then task.cancel(attackThread) attackThread = nil end
+end
+
+local function StartAutoAttack()
+    StopAutoAttack()
+    autoAttackEnabled = true
+    attackThread = task.spawn(function()
+        while autoAttackEnabled and StillValid() do
+            for _, key in ipairs(ATTACK_KEYS_ORDER) do
+                if selectedAttackKeys[key] then
+                    local action = ATTACK_ACTIONS[key]
+                    if action then pcall(action) end
+                end
+            end
+            task.wait(0)
+        end
+    end)
 end
 
 -- ──────────────────────────────────────────────
 -- Window
 -- ──────────────────────────────────────────────
 
+if not StillValid() then Library:Unload() return end
+
 local Window = Library:CreateWindow({
-    Title = "NPC Dialogue",
-    Footer = "dialogue script",
-    Center = true,
-    AutoShow = true,
+    Title         = "Bizarre Lineage",
+    Footer        = "discord.gg/darkdefense",
+    Center        = true,
+    AutoShow      = true,
     ToggleKeybind = Enum.KeyCode.RightControl,
 })
 
 local Tabs = {
-    Main = Window:AddTab("NPCs", "user"),
+    Main            = Window:AddTab("Main",          "user"),
     ["UI Settings"] = Window:AddTab("UI & Settings", "settings"),
 }
 
@@ -358,13 +726,12 @@ local Tabs = {
 -- Left — Current Quest
 -- ──────────────────────────────────────────────
 
-local QuestBox = Tabs.Main:AddLeftGroupbox("Current Quest")
-
+local QuestBox   = Tabs.Main:AddLeftGroupbox("Current Quest")
 local QuestLabel = QuestBox:AddLabel("Quest NPC: detecting...")
 
 local function UpdateQuestLabel()
-    local name = GetQuestNPCName()
-    local markers = GetAllQuestMarkers()
+    local name       = GetQuestNPCName()
+    local markers    = GetAllQuestMarkers()
     local markerText = #markers > 0 and (" | " .. #markers .. " marker(s)") or ""
     QuestLabel:SetText(
         name and ("Quest NPC: " .. name .. markerText)
@@ -375,9 +742,9 @@ end
 UpdateQuestLabel()
 
 QuestBox:AddButton({
-    Text = "Talk to Quest NPC",
+    Text    = "Talk to Quest NPC",
     Tooltip = "Fire dialogue for the detected quest NPC",
-    Func = function()
+    Func    = function()
         local name = GetQuestNPCName()
         if not name then
             Library:Notify({ Title = "Error", Description = "No quest NPC detected.", Time = 3 })
@@ -389,34 +756,30 @@ QuestBox:AddButton({
 })
 
 QuestBox:AddButton({
-    Text = "TP to Quest",
+    Text    = "TP to Quest",
     Tooltip = "Teleport to the next quest marker (cycles through all markers)",
-    Func = function()
+    Func    = function()
         TeleportToQuest()
         UpdateQuestLabel()
     end,
 })
 
 QuestBox:AddButton({
-    Text = "Refresh Quest",
+    Text    = "Refresh Quest",
     Tooltip = "Re-scan quest labels and markers",
-    Func = function()
+    Func    = function()
         questMarkerIndex = 0
         UpdateQuestLabel()
         local markers = GetAllQuestMarkers()
-        Library:Notify({
-            Title = "Refreshed",
-            Description = #markers .. " quest marker(s) found.",
-            Time = 3,
-        })
+        Library:Notify({ Title = "Refreshed", Description = #markers .. " quest marker(s) found.", Time = 3 })
     end,
 })
 
 QuestBox:AddButton({
-    Text = "DEBUG: Print Quest Labels",
+    Text    = "DEBUG: Print Quest Labels",
     Tooltip = "Prints all PlayerGui TextLabels and quest markers to console",
-    Func = function()
-        local gui = LocalPlayer.PlayerGui
+    Func    = function()
+        local gui        = LocalPlayer.PlayerGui
         local taskHolder = WalkPath(gui, { "menu", "task_holder" })
         if not taskHolder then
             print("[DEBUG] task_holder not found")
@@ -439,30 +802,31 @@ QuestBox:AddButton({
         end
         local detected = GetQuestNPCName()
         print("[DEBUG] Detected NPC: " .. tostring(detected))
-        Library:Notify({
-            Title = "DEBUG",
-            Description = count .. " labels, " .. #markers .. " markers. Check console.",
-            Time = 3,
-        })
+        print("[DEBUG] npc_cache children:")
+        for _, c in ipairs(npc_cache:GetChildren()) do print("[DEBUG]   " .. c.Name) end
+        print("[DEBUG] Scanning all visible ScreenGui frames...")
+        for _, sg in ipairs(gui:GetChildren()) do
+            if sg:IsA("ScreenGui") then
+                for _, desc in ipairs(sg:GetDescendants()) do
+                    if desc:IsA("GuiObject") and desc.Visible then
+                        print("[DEBUG] Visible: " .. desc:GetFullName())
+                    end
+                end
+            end
+        end
+        Library:Notify({ Title = "DEBUG", Description = count .. " labels, " .. #markers .. " markers. Check console.", Time = 3 })
     end,
 })
 
 QuestBox:AddDivider()
-
--- ──────────────────────────────────────────────
--- Left — Manual Select
--- ──────────────────────────────────────────────
-
 QuestBox:AddLabel("— Manual Select —")
 
 QuestBox:AddDropdown("NPCSelect", {
-    Values = npcNames,
-    Default = 1,
-    Text = "Select NPC",
+    Values     = npcNames,
+    Default    = 1,
+    Text       = "Select NPC",
     Searchable = true,
-    Callback = function(Value)
-        SelectedNPC = Value
-    end,
+    Callback   = function(Value) SelectedNPC = Value end,
 })
 
 QuestBox:AddDivider()
@@ -473,8 +837,94 @@ QuestBox:AddButton({
 })
 
 QuestBox:AddButton({
-    Text = "TP to NPC",
-    Func = function() TeleportToQuest() end,
+    Text    = "TP to NPC",
+    Tooltip = "Teleport directly to the selected NPC",
+    Func    = function()
+        if not SelectedNPC or SelectedNPC == "" then
+            Library:Notify({ Title = "Error", Description = "No NPC selected.", Time = 3 })
+            return
+        end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then
+            Library:Notify({ Title = "Error", Description = "Character not ready.", Time = 3 })
+            return
+        end
+        local targetModel = nil
+        pcall(function() targetModel = npc_cache[SelectedNPC] end)
+        if not targetModel then
+            pcall(function()
+                local wsNpcs = Workspace:FindFirstChild("Npcs")
+                if wsNpcs then targetModel = wsNpcs:FindFirstChild(SelectedNPC) end
+            end)
+        end
+        if not targetModel then
+            Library:Notify({ Title = "Error", Description = "'" .. SelectedNPC .. "' not found in world.", Time = 3 })
+            return
+        end
+        local targetPart = targetModel:FindFirstChild("HumanoidRootPart")
+                        or targetModel:FindFirstChildOfClass("BasePart")
+                        or targetModel:FindFirstChildWhichIsA("BasePart", true)
+        if not targetPart then
+            Library:Notify({ Title = "Error", Description = "Could not find a part on '" .. SelectedNPC .. "'.", Time = 3 })
+            return
+        end
+        root.CFrame = targetPart.CFrame + Vector3.new(0, 4, 0)
+        Library:Notify({ Title = "TP to NPC", Description = "Teleported to: " .. SelectedNPC, Time = 2 })
+    end,
+})
+
+-- ──────────────────────────────────────────────
+-- Left — Combat
+-- ──────────────────────────────────────────────
+
+local CombatBox = Tabs.Main:AddLeftGroupbox("Combat")
+
+CombatBox:AddToggle("AutoSummonToggle", {
+    Text     = "Auto Summon Stand",
+    Default  = false,
+    Tooltip  = "Checks workspace.Effects for your stand. Fires SummonStand only when it is not already out.",
+    Callback = function(Value)
+        if Value then
+            StartAutoSummon()
+            Library:Notify({ Title = "Auto Summon Stand", Description = "Enabled.", Time = 2 })
+        else
+            StopAutoSummon()
+            Library:Notify({ Title = "Auto Summon Stand", Description = "Disabled.", Time = 2 })
+        end
+    end,
+})
+
+CombatBox:AddDivider()
+
+CombatBox:AddToggle("AutoAttackToggle", {
+    Text     = "Auto Attack",
+    Default  = false,
+    Tooltip  = "Fires all selected inputs in a loop as fast as possible.",
+    Callback = function(Value)
+        if Value then
+            StartAutoAttack()
+            Library:Notify({ Title = "Auto Attack", Description = "Enabled.", Time = 2 })
+        else
+            StopAutoAttack()
+            Library:Notify({ Title = "Auto Attack", Description = "Disabled.", Time = 2 })
+        end
+    end,
+})
+
+CombatBox:AddDropdown("AttackKeyDropdown", {
+    Values   = { "M1", "M2", "E", "R", "Z", "X", "C" },
+    Default  = { "M1" },
+    Text     = "Attack Inputs",
+    Tooltip  = "Select one or more inputs to spam. Skills (E/R/Z/X/C) fire before M1/M2 each cycle.",
+    Multi    = true,
+    Callback = function(Value)
+        selectedAttackKeys = {}
+        for k, enabled in pairs(Value) do
+            if enabled then selectedAttackKeys[k] = true end
+        end
+        if autoAttackEnabled then StartAutoAttack() end
+    end,
 })
 
 -- ──────────────────────────────────────────────
@@ -494,6 +944,95 @@ RightBox:AddButton({
 })
 
 -- ──────────────────────────────────────────────
+-- Right — Auto Raid
+-- ──────────────────────────────────────────────
+
+local Raidbox = Tabs.Main:AddRightGroupbox("Auto Raid")
+
+Raidbox:AddToggle("AutoSpawnToggle", {
+    Text     = "Auto Spawn (every 5s)",
+    Default  = false,
+    Tooltip  = "Automatically fires the spawn event and destroys the Main Menu every 5 seconds.",
+    Callback = function(Value)
+        autoSpawnEnabled = Value
+        if Value then
+            Library:Notify({ Title = "Auto Spawn", Description = "Enabled — running every 5s.", Time = 3 })
+            StartAutoSpawnLoop()
+        else
+            StopAutoSpawnLoop()
+            Library:Notify({ Title = "Auto Spawn", Description = "Disabled.", Time = 2 })
+        end
+    end,
+})
+
+Raidbox:AddButton({
+    Text    = "Spawn Once",
+    Tooltip = "Manually fire the spawn event once right now",
+    Func    = function()
+        local ok = TryAutoSpawn()
+        Library:Notify({
+            Title       = "Spawn Once",
+            Description = ok and "Spawn fired!" or "Main Menu not found — already spawned?",
+            Time        = 3,
+        })
+    end,
+})
+
+Raidbox:AddDivider()
+
+Raidbox:AddToggle("StartAutoRaid", {
+    Text     = "Auto Raid Toggle",
+    Default  = false,
+    Tooltip  = "Glues under every '.' mob in workspace.Live (skips Hostage). Waits for mobs to spawn. Stops only after 3s of confirmed empty Live.",
+    Callback = function(Value)
+        if Value then
+            StopAutoRaid()
+            autoRaidEnabled = true
+            StartAutoRaid()
+            Library:Notify({ Title = "Auto Raid", Description = "Active — waiting for mobs.", Time = 3 })
+        else
+            StopAutoRaid()
+            Library:Notify({ Title = "Auto Raid", Description = "Stopped.", Time = 2 })
+        end
+    end,
+})
+
+Raidbox:AddButton({
+    Text    = "Stop Raid Now",
+    Tooltip = "Immediately stops the raid, restores collisions and teleports you back",
+    Func    = function()
+        StopAutoRaid()
+        Library:Notify({ Title = "Auto Raid", Description = "Force-stopped.", Time = 2 })
+    end,
+})
+
+Raidbox:AddDivider()
+
+Raidbox:AddToggle("AutoRetryRaid", {
+    Text     = "Auto Retry (every 1s)",
+    Default  = false,
+    Tooltip  = "Fires retryraid every 1s, but only once raidcomplete appears in your PlayerGui.",
+    Callback = function(Value)
+        if Value then
+            StartAutoRetry()
+            Library:Notify({ Title = "Auto Retry", Description = "Enabled — watching for raidcomplete.", Time = 3 })
+        else
+            StopAutoRetry()
+            Library:Notify({ Title = "Auto Retry", Description = "Disabled.", Time = 2 })
+        end
+    end,
+})
+
+Raidbox:AddButton({
+    Text    = "Retry Once",
+    Tooltip = "Manually fire retryraid right now",
+    Func    = function()
+        pcall(function() ReplicatedStorage.requests.character.retryraid:FireServer() end)
+        Library:Notify({ Title = "Auto Retry", Description = "Retry fired!", Time = 2 })
+    end,
+})
+
+-- ──────────────────────────────────────────────
 -- UI Settings
 -- ──────────────────────────────────────────────
 
@@ -504,3 +1043,17 @@ SaveManager:SetFolder("NPCDialogueScript")
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:BuildConfigSection(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
+
+-- ──────────────────────────────────────────────
+-- Cleanup
+-- ──────────────────────────────────────────────
+
+_G.BLCleanup = function()
+    StopAutoSpawnLoop()
+    StopAutoRaid()
+    StopAutoRetry()
+    StopAutoSummon()
+    StopAutoAttack()
+    pcall(function() Library:Unload() end)
+    _G.BLLib = nil
+end
