@@ -560,7 +560,7 @@ local function StartAutoRaid()
             if live and #live:GetChildren() > 0 and not AnyRaidMobsExist() then
                 -- Models exist but none are valid targets — accumulate dead time
                 raidClearTimer = raidClearTimer + dt
-                if raidClearTimer >= 3 then
+                if raidClearTimer >= 10 then
                     -- Confirmed dead for 3 seconds straight
                     raidHeartbeat:Disconnect() raidHeartbeat = nil
                     Library:Notify({ Title = "Auto Raid", Description = "All mobs cleared! Returning home.", Time = 4 })
