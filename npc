@@ -127,23 +127,37 @@ local function GetQuestNPCName()
         end
 
         local function tryMatch(text)
-            -- Step 1: pattern extraction (e.g. "Talk to: Kobayashi")
+            local lowerText = text:lower()
+
+            -- Step 1: pattern extraction (e.g. "Talk to: Reimi")
             for _, pattern in ipairs(EXTRACT_PATTERNS) do
                 local m = text:match(pattern)
                 if m then
                     local extracted = m:match("^%s*(.-)%s*$"):lower()
                     for _, child in ipairs(npcCache) do
-                        if child.Name:lower() == extracted or child.Name:lower():find(extracted, 1, true) then
+                        local childLower = child.Name:lower()
+                        -- exact match, npc name contains extracted, or extracted contains npc first word
+                        if childLower == extracted
+                            or childLower:find(extracted, 1, true)
+                            or extracted:find(childLower, 1, true) then
                             found = child.Name
                             return true
                         end
                     end
                 end
             end
-            -- Step 2: scan text for any npc_cache name
-            local lowerText = text:lower()
+
+            -- Step 2: check if full npc name is in text, OR if npc first name is in text
             for _, child in ipairs(npcCache) do
-                if lowerText:find(child.Name:lower(), 1, true) then
+                local childLower = child.Name:lower()
+                -- full name match
+                if lowerText:find(childLower, 1, true) then
+                    found = child.Name
+                    return true
+                end
+                -- first word of npc name match (e.g. "Reimi" from "Reimi Sugimoto")
+                local firstName = childLower:match("^(%S+)")
+                if firstName and #firstName >= 4 and lowerText:find(firstName, 1, true) then
                     found = child.Name
                     return true
                 end
