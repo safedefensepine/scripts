@@ -156,12 +156,25 @@ local function GetQuestNPCName()
             if tryMatch(text) then return end
         end
 
-        -- Fallback: use quest marker titles (e.g. "Kobayashi" from questbrick)
+        -- Fallback 1: use quest marker titles (e.g. "Kobayashi" from questbrick)
         if not found then
             local markers = GetAllQuestMarkers()
             for _, m in ipairs(markers) do
                 if m.title and m.title ~= "Quest Marker" then
                     if tryMatch(m.title) then return end
+                end
+            end
+        end
+
+        -- Fallback 2: scan ALL TextLabels inside task_holder for any npc_cache name
+        if not found then
+            local holder = WalkPath(gui, { "menu", "task_holder" })
+            if holder then
+                for _, obj in ipairs(holder:GetDescendants()) do
+                    if obj:IsA("TextLabel") and obj.Text ~= "" then
+                        local t = obj.Text:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                        if tryMatch(t) then return end
+                    end
                 end
             end
         end
