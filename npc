@@ -93,6 +93,7 @@ end
 -- ──────────────────────────────────────────────
 
 local EXTRACT_PATTERNS = {
+    -- Colon style: "Talk to: Boxing Coach"
     "[Tt]alk [Tt]o:%s*([%a][%a%s]*[%a])",
     "[Ss]peak [Tt]o:%s*([%a][%a%s]*[%a])",
     "[Ss]peak [Ww]ith:%s*([%a][%a%s]*[%a])",
@@ -100,9 +101,15 @@ local EXTRACT_PATTERNS = {
     "[Pp]rotect:%s*([%a][%a%s]*[%a])",
     "[Vv]isit:%s*([%a][%a%s]*[%a])",
     "[Ii]nteract [Ww]ith:%s*([%a][%a%s]*[%a])",
-    "[Tt]alk [Tt]o%s+([%u][%a]+)",
-    "[Ss]peak [Tt]o%s+([%u][%a]+)",
-    "[Ff]ind%s+([%u][%a]+)",
+    -- Space style with capital: "Talk to Kobayashi"
+    "[Tt]alk [Tt]o%s+([%u][%a%s]+[%a])",
+    "[Ss]peak [Tt]o%s+([%u][%a%s]+[%a])",
+    "[Ff]ind%s+([%u][%a%s]+[%a])",
+    -- Defeat/Kill/Chase: "Defeat Okuyasu Nijimura"
+    "[Dd]efeat%s+([%u][%a%s]+[%a])",
+    "[Kk]ill%s+([%u][%a%s]+[%a])",
+    "[Cc]hase%s+([%u][%a%s]+[%a])",
+    "[Ff]ollow%s+([%u][%a%s]+[%a])",
 }
 
 local OBJECTIVE_PATHS = {
@@ -121,7 +128,13 @@ local function GetQuestNPCName()
         for _, pathDef in ipairs(OBJECTIVE_PATHS) do
             local label = WalkPath(gui, pathDef)
             if label and label:IsA("TextLabel") and label.Text ~= "" then
-                local cleaned = label.Text:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                local cleaned = label.Text
+                    :gsub("<[^>]+>", "")   -- strip RichText
+                    :gsub("[「」『』【】〔〕]", "") -- strip Japanese brackets
+                    :gsub("%[.-%]", "")    -- strip [0/1] style counters
+                    :gsub("%(.-%)", "")    -- strip (0/1) style counters
+                    :gsub("%s+", " ")
+                    :match("^%s*(.-)%s*$")
                 table.insert(textsToCheck, cleaned)
             end
         end
