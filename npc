@@ -454,7 +454,8 @@ local raidNoclipHB      = nil
 local raidRetryThread   = nil
 local autoRetryEnabled  = false
 local savedRaidPosition = nil
-local raidClearTimer    = 0   -- seconds spent seeing no valid targets
+local raidClearTimer    = 0
+local raidHasSeenMob    = false
 
 local RAID_OFFSET = CFrame.new(0, -9, 0) * CFrame.Angles(math.pi / 2, 0, 0)
 
@@ -477,23 +478,10 @@ local function FindRaidTarget()
     return nil
 end
 
-local function AnyRaidMobsExist()
-    local live = Workspace:FindFirstChild("Live")
-    if not live then return false end
-    for _, obj in ipairs(live:GetChildren()) do
-        if obj:IsA("Model")
-            and obj.Name:find(".", 1, true)
-            and not obj.Name:lower():find("hostage", 1, true)
-        then
-            return true
-        end
-    end
-    return false
-end
-
 local function RestoreAfterRaid()
     autoRaidEnabled = false
     raidClearTimer  = 0
+    raidHasSeenMob  = false
     if raidHeartbeat then raidHeartbeat:Disconnect() raidHeartbeat = nil end
     if raidNoclipHB  then raidNoclipHB:Disconnect()  raidNoclipHB  = nil end
     pcall(function()
@@ -519,6 +507,8 @@ end
 local function StartAutoRaid()
     autoRaidEnabled = true
     raidClearTimer  = 0
+    raidHasSeenMob  = false
+
     pcall(function()
         local char = LocalPlayer.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -537,9 +527,9 @@ local function StartAutoRaid()
         end
     end)
 
-    -- Glue + completion check every frame.
-    -- Requires 3 consecutive seconds of no valid targets before stopping.
-    -- While Live is empty/missing we keep waiting (mobs not yet spawned).
+    -- Glue + completion check.
+    -- Waits silently until the first mob is seen, then starts a 10s
+    -- countdown the moment no target is found. Resets instantly on re-lock.
     raidHeartbeat = RunService.Heartbeat:Connect(function(dt)
         if not autoRaidEnabled or not StillValid() then
             raidHeartbeat:Disconnect() raidHeartbeat = nil return
@@ -552,25 +542,20 @@ local function StartAutoRaid()
         local npcRoot = FindRaidTarget()
 
         if npcRoot then
-            -- Live target found — glue to it and reset the clear timer
+            -- Found a live target — glue to it and reset timers
             root.CFrame = npcRoot.CFrame * RAID_OFFSET
             raidClearTimer = 0
-        else
-            local live = Workspace:FindFirstChild("Live")
-            if live and #live:GetChildren() > 0 and not AnyRaidMobsExist() then
-                -- Models exist but none are valid targets — accumulate dead time
-                raidClearTimer = raidClearTimer + dt
-                if raidClearTimer >= 10 then
-                    -- Confirmed dead for 3 seconds straight
-                    raidHeartbeat:Disconnect() raidHeartbeat = nil
-                    Library:Notify({ Title = "Auto Raid", Description = "All mobs cleared! Returning home.", Time = 4 })
-                    RestoreAfterRaid()
-                end
-            else
-                -- Live is empty or missing — still waiting for mobs to spawn, reset timer
-                raidClearTimer = 0
+            raidHasSeenMob = true
+        elseif raidHasSeenMob then
+            -- Had a mob before but none found now — accumulate dead time
+            raidClearTimer = raidClearTimer + dt
+            if raidClearTimer >= 10 then
+                raidHeartbeat:Disconnect() raidHeartbeat = nil
+                Library:Notify({ Title = "Auto Raid", Description = "All mobs cleared! Returning home.", Time = 4 })
+                RestoreAfterRaid()
             end
         end
+        -- raidHasSeenMob is false — keep waiting silently for first mob
     end)
 end
 
@@ -983,7 +968,7 @@ Raidbox:AddDivider()
 Raidbox:AddToggle("StartAutoRaid", {
     Text     = "Auto Raid Toggle",
     Default  = false,
-    Tooltip  = "Glues under every '.' mob in workspace.Live (skips Hostage). Waits for mobs to spawn. Stops only after 3s of confirmed empty Live.",
+    Tooltip  = "Glues under every '.' mob in workspace.Live (skips Hostage). Waits for mobs to spawn. Stops only after 10s of confirmed no targets.",
     Callback = function(Value)
         if Value then
             StopAutoRaid()
