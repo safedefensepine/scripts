@@ -1,9 +1,6 @@
-task.wait(2)
+task.wait(1)
 
--- ──────────────────────────────────────────────
--- Generation guard — abort if a newer run starts
--- ──────────────────────────────────────────────
-
+-- ... rest of script continues unchanged
 _G.BLGeneration = (_G.BLGeneration or 0) + 1
 local myGen = _G.BLGeneration
 
@@ -17,7 +14,6 @@ end
 -- ──────────────────────────────────────────────
 -- Load libraries
 -- ──────────────────────────────────────────────
-
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
 
 local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
