@@ -1,3 +1,5 @@
+task.wait(2)
+
 -- ──────────────────────────────────────────────
 -- Generation guard — abort if a newer run starts
 -- ──────────────────────────────────────────────
@@ -15,8 +17,6 @@ end
 -- ──────────────────────────────────────────────
 -- Load libraries
 -- ──────────────────────────────────────────────
-wait(3)
-
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
 
@@ -42,7 +42,7 @@ local Event     = ReplicatedStorage.requests.character.dialogue
 local npc_cache = ReplicatedStorage.assets.npc_cache
 
 -- ──────────────────────────────────────────────
--- Discord Webhook
+-- Discord Webhook (script executed)
 -- ──────────────────────────────────────────────
 
 task.spawn(function()
@@ -71,6 +71,77 @@ task.spawn(function()
         })
     end)
 end)
+
+-- ──────────────────────────────────────────────
+-- Raid Complete Webhook
+-- ──────────────────────────────────────────────
+
+local raidWebhookFired = false
+
+local function ScanRaidLoot()
+    local loot = { legendary = {}, rare = {} }
+    pcall(function()
+        local gui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not gui then return end
+        local rc = gui:FindFirstChild("raidcomplete")
+        if not rc then return end
+        for _, obj in ipairs(rc:GetDescendants()) do
+            if obj:IsA("TextLabel") and obj.Text ~= "" then
+                local text = obj.Text
+                    :gsub("<[^>]+>", "")
+                    :match("^%s*(.-)%s*$")
+                if text ~= "" then
+                    local lower = text:lower()
+                    if lower:find("legendary") then
+                        table.insert(loot.legendary, text)
+                    elseif lower:find("rare") then
+                        table.insert(loot.rare, text)
+                    end
+                end
+            end
+        end
+    end)
+    return loot
+end
+
+local function SendRaidCompleteWebhook(loot)
+    task.spawn(function()
+        local webhookUrl = "https://discord.com/api/webhooks/1478822782300061744/8SLYkjNQgkPvClQM5v6fm-gvE1TPbTY0FY_FT6RBF0tcAqLPYfLyTM8Cw34rgDXmyWrc"
+
+        local legendaryText = #loot.legendary > 0
+            and table.concat(loot.legendary, "\n")
+            or "None"
+
+        local rareText = #loot.rare > 0
+            and table.concat(loot.rare, "\n")
+            or "None"
+
+        local payload = HttpService:JSONEncode({
+            embeds = {{
+                title  = "✅ Raid Completed!",
+                color  = #loot.legendary > 0 and 0xFFD700 or 0x5865F2,
+                fields = {
+                    { name = "Player",             value = LocalPlayer.Name,             inline = true  },
+                    { name = "User ID",            value = tostring(LocalPlayer.UserId), inline = true  },
+                    { name = "Place ID",           value = tostring(game.PlaceId),       inline = true  },
+                    { name = "⭐ Legendary Drops", value = legendaryText,                inline = false },
+                    { name = "💠 Rare Drops",      value = rareText,                     inline = false },
+                },
+                footer    = { text = "discord.gg/darkdefense" },
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            }}
+        })
+
+        pcall(function()
+            request({
+                Url     = webhookUrl,
+                Method  = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body    = payload,
+            })
+        end)
+    end)
+end
 
 -- ──────────────────────────────────────────────
 -- Helpers
@@ -517,7 +588,6 @@ local function StartAutoRaid()
         if root then savedRaidPosition = root.CFrame end
     end)
 
-    -- Noclip: strip CanCollide every frame
     raidNoclipHB = RunService.Heartbeat:Connect(function()
         if not autoRaidEnabled or not StillValid() then
             raidNoclipHB:Disconnect() raidNoclipHB = nil return
@@ -529,9 +599,6 @@ local function StartAutoRaid()
         end
     end)
 
-    -- Glue + completion check.
-    -- Waits silently until the first mob is seen, then starts a 10s
-    -- countdown the moment no target is found. Resets instantly on re-lock.
     raidHeartbeat = RunService.Heartbeat:Connect(function(dt)
         if not autoRaidEnabled or not StillValid() then
             raidHeartbeat:Disconnect() raidHeartbeat = nil return
@@ -544,12 +611,10 @@ local function StartAutoRaid()
         local npcRoot = FindRaidTarget()
 
         if npcRoot then
-            -- Found a live target — glue to it and reset timers
             root.CFrame = npcRoot.CFrame * RAID_OFFSET
             raidClearTimer = 0
             raidHasSeenMob = true
         elseif raidHasSeenMob then
-            -- Had a mob before but none found now — accumulate dead time
             raidClearTimer = raidClearTimer + dt
             if raidClearTimer >= 10 then
                 raidHeartbeat:Disconnect() raidHeartbeat = nil
@@ -557,7 +622,6 @@ local function StartAutoRaid()
                 RestoreAfterRaid()
             end
         end
-        -- raidHasSeenMob is false — keep waiting silently for first mob
     end)
 end
 
@@ -571,11 +635,19 @@ end
 local function StartAutoRetry()
     StopAutoRetry()
     autoRetryEnabled = true
+    raidWebhookFired = false
     raidRetryThread = task.spawn(function()
         while autoRetryEnabled and StillValid() do
             local gui = LocalPlayer:FindFirstChild("PlayerGui")
             if gui and gui:FindFirstChild("raidcomplete") then
+                if not raidWebhookFired then
+                    raidWebhookFired = true
+                    local loot = ScanRaidLoot()
+                    SendRaidCompleteWebhook(loot)
+                end
                 pcall(function() ReplicatedStorage.requests.character.retryraid:FireServer() end)
+            else
+                raidWebhookFired = false
             end
             task.wait(1)
         end
@@ -998,7 +1070,7 @@ Raidbox:AddDivider()
 Raidbox:AddToggle("AutoRetryRaid", {
     Text     = "Auto Retry (every 1s)",
     Default  = false,
-    Tooltip  = "Fires retryraid every 1s, but only once raidcomplete appears in your PlayerGui.",
+    Tooltip  = "Fires retryraid every 1s once raidcomplete appears. Also sends a webhook with loot info.",
     Callback = function(Value)
         if Value then
             StartAutoRetry()
